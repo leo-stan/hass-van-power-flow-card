@@ -15,7 +15,7 @@
  * Vanilla JS custom element — no build step. Config via YAML or the visual editor.
  */
 
-const VERSION = "0.2.0";
+const VERSION = "1.0.0";
 
 // Inverter/charger states that mean "charging the battery" (AC -> DC), used to
 // flip the battery<->inverter flow direction. Extend via config if needed.
@@ -73,7 +73,6 @@ class VanPowerFlowCard extends HTMLElement {
     this._hass = hass;
     if (!this._built) this._build();
     this._update();
-    if (this._historyCard && this._historyCard.isConnected) this._historyCard.hass = hass;
     requestAnimationFrame(() => this._draw());
   }
 
@@ -105,33 +104,16 @@ class VanPowerFlowCard extends HTMLElement {
     this.dispatchEvent(e);
   }
 
-  // Popup 24h history-graph of the given entities (state + watts + volts).
-  async _historyDialog(title, entityIds) {
+  // Navigate to the built-in History panel pre-loaded with the given entities,
+  // defaulting to the last 24h. The native panel keeps the full timescale picker
+  // (the user can widen to 7d / 30d / custom from there).
+  _history(entityIds) {
     const ids = entityIds.filter(Boolean);
     if (!ids.length) return;
-    const overlay = document.createElement("div");
-    overlay.className = "vpf-modal";
-    overlay.innerHTML = `
-      <div class="vpf-modal-box">
-        <div class="vpf-modal-hdr">
-          <span>${title} — last 24h</span>
-          <ha-icon class="vpf-modal-close" icon="mdi:close"></ha-icon>
-        </div>
-        <div class="vpf-modal-body"></div>
-      </div>`;
-    const close = () => { overlay.remove(); this._historyCard = null; };
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
-    overlay.querySelector(".vpf-modal-close").addEventListener("click", close);
-    this.shadowRoot.appendChild(overlay);
-    try {
-      const helpers = await window.loadCardHelpers();
-      const card = await helpers.createCardElement({ type: "history-graph", hours_to_show: 24, entities: ids });
-      card.hass = this._hass;
-      this._historyCard = card;
-      overlay.querySelector(".vpf-modal-body").appendChild(card);
-    } catch (err) {
-      overlay.querySelector(".vpf-modal-body").textContent = "Unable to load history graph.";
-    }
+    const start = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const path = `/history?entity_id=${ids.join(",")}&start_date=${encodeURIComponent(start)}`;
+    history.pushState(null, "", path);
+    this.dispatchEvent(new Event("location-changed", { bubbles: true, composed: true }));
   }
 
   // Build the inner rows of a source-style node (solar / alternator).
@@ -213,11 +195,11 @@ class VanPowerFlowCard extends HTMLElement {
         const n = box.dataset.node;
         if (n === "solar" || n === "alternator") {
           const cfg = c[n];
-          this._historyDialog(cfg.name, [cfg.state, cfg.power, cfg.input_voltage]);
+          this._history([cfg.state, cfg.power, cfg.input_voltage]);
         } else if (n === "battery") {
-          this._historyDialog(b.name, [b.soc, b.power, b.voltage, b.temperature]);
+          this._history([b.soc, b.power, b.voltage, b.temperature]);
         } else if (n === "inverter") {
-          this._moreInfo(c.inverter.mode || c.inverter.state || c.inverter.power);
+          this._history([c.inverter.state, c.inverter.power]);
         }
       });
     });
@@ -381,31 +363,6 @@ const STYLE = `
   .sub { font-size: 12px; color: var(--vpf-sub, #9fb3c8); margin-top: 3px; display: flex; align-items: center; justify-content: center; gap: 3px; }
   .sub.dim { color: var(--vpf-sub-dim, #6f829a); font-size: 11px; }
   ha-icon.mini { --mdc-icon-size: 13px; }
-
-  .vpf-modal {
-    position: fixed; inset: 0; z-index: 99;
-    background: rgba(0, 0, 0, 0.55);
-    display: flex; align-items: center; justify-content: center;
-    padding: 16px;
-  }
-  .vpf-modal-box {
-    background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
-    color: var(--primary-text-color, #fff);
-    border-radius: 14px;
-    width: min(560px, 96vw);
-    max-height: 86vh; overflow: auto;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-  }
-  .vpf-modal-hdr {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 16px; font-size: 16px; font-weight: 500;
-    border-bottom: 1px solid var(--divider-color, #333);
-    position: sticky; top: 0;
-    background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
-  }
-  .vpf-modal-close { cursor: pointer; --mdc-icon-size: 22px; color: var(--secondary-text-color, #aaa); }
-  .vpf-modal-close:hover { color: var(--primary-text-color, #fff); }
-  .vpf-modal-body { padding: 8px 12px 14px; }
 `;
 
 // ---------------------------------------------------------------------------
