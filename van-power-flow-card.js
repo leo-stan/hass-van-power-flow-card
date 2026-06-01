@@ -29,6 +29,7 @@ const DEFAULTS = {
     name: "Alternator", icon: "mdi:engine",
     power: "sensor.gx_device_dc_alternator_power",
     state: "sensor.orion_xs_hq2532z29za_state",
+    input_voltage: "sensor.orion_xs_hq2532z29za_input_voltage", // van starter battery
   },
   battery: {
     name: "Battery", icon: "mdi:car-battery",
@@ -38,6 +39,7 @@ const DEFAULTS = {
     current: "sensor.gx_device_dc_battery_current",
     time_to_go: "sensor.bmv_700_id_278_time_to_go",
     state: "sensor.gx_device_dc_battery_state",
+    temperature: "sensor.multiplus_12_1200_50_16_120v_id_276_dc_temperature",
   },
   inverter: {
     name: "Inverter", icon: "mdi:sine-wave",
@@ -76,12 +78,11 @@ class VanPowerFlowCard extends HTMLElement {
   _fmtState(s) { return (s || "").replace(/_/g, " "); }
   _fmtTtg(sec) {
     if (!sec || sec <= 0) return "—";
-    // Round to the nearest minute and carry up, so the Victron 863999s sentinel
-    // (9d 23h 59m 59s) renders as a clean "10d" like the VRM does.
-    const totalMin = Math.round(sec / 60);
-    const d = Math.floor(totalMin / 1440);
-    const h = Math.floor((totalMin % 1440) / 60);
-    const m = totalMin % 60;
+    // Truncate (floor) like Victron VRM does, so the 863999s sentinel
+    // (9d 23h 59m 59s) renders as "9d 23h" to match the Victron UI exactly.
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
     if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
     if (h > 0) return `${h}h ${m}m`;
     return `${m}m`;
@@ -111,6 +112,7 @@ class VanPowerFlowCard extends HTMLElement {
             <div class="hdr"><ha-icon icon="${c.alternator.icon}"></ha-icon><span>${c.alternator.name}</span></div>
             <div class="state" data-f="alt-state">—</div>
             <div class="primary" data-f="alt-power">— W</div>
+            <div class="sub dim" data-f="alt-vin">—</div>
           </div>
           <div class="box battery" data-node="battery">
             <div class="hdr"><ha-icon icon="${c.battery.icon}"></ha-icon><span>${c.battery.name}</span></div>
@@ -160,6 +162,11 @@ class VanPowerFlowCard extends HTMLElement {
     // Alternator
     f["alt-state"].textContent = this._fmtState(this._stateStr(c.alternator.state));
     f["alt-power"].textContent = this._fmtW(this._num(c.alternator.power));
+    const vin = this._st(c.alternator.input_voltage);
+    f["alt-vin"].textContent =
+      vin && vin.state !== "unavailable" && vin.state !== "unknown"
+        ? `${this._num(c.alternator.input_voltage).toFixed(2)} V in`
+        : "";
     // Battery
     const bp = this._num(c.battery.power); // negative = discharging
     // Victron's UI labels by current direction, not the GX state entity (which
@@ -169,8 +176,13 @@ class VanPowerFlowCard extends HTMLElement {
     f["batt-soc"].textContent = Math.round(this._num(c.battery.soc)) + " %";
     f["batt-power"].textContent = this._fmtW(bp); // signed: negative when discharging
     f["batt-ttg"].innerHTML = `<ha-icon class="mini" icon="mdi:timer-sand"></ha-icon>${this._fmtTtg(this._num(c.battery.time_to_go))}`;
-    f["batt-va"].textContent =
-      `${this._num(c.battery.voltage).toFixed(2)} V · ${this._num(c.battery.current).toFixed(1)} A`;
+    let vaText = `${this._num(c.battery.voltage).toFixed(2)} V`;
+    const ts = this._st(c.battery.temperature);
+    if (ts && ts.state !== "unavailable" && ts.state !== "unknown") {
+      const unit = ts.attributes?.unit_of_measurement || "°";
+      vaText += ` · ${Math.round(this._num(c.battery.temperature))}${unit}`;
+    }
+    f["batt-va"].textContent = vaText;
     // Inverter
     f["inv-state"].textContent = this._fmtState(this._stateStr(c.inverter.state));
     f["inv-power"].textContent = this._fmtW(this._num(c.inverter.power));
