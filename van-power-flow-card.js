@@ -40,7 +40,7 @@ const DEFAULTS = {
     state: "sensor.gx_device_dc_battery_state",
   },
   inverter: {
-    name: "Inverter / Charger", icon: "mdi:sine-wave",
+    name: "Inverter", icon: "mdi:sine-wave",
     power: "sensor.gx_device_consumption_power_l1",
     state: "sensor.multiplus_12_1200_50_16_120v_id_276_state",
     mode: "select.multiplus_12_1200_50_16_120v_id_276",
@@ -75,9 +75,16 @@ class VanPowerFlowCard extends HTMLElement {
   _fmtW(w) { const a = Math.abs(w); return (a >= 1000 ? (w / 1000).toFixed(1) + " kW" : Math.round(w) + " W"); }
   _fmtState(s) { return (s || "").replace(/_/g, " "); }
   _fmtTtg(sec) {
-    if (!sec || sec <= 0 || sec >= 863999) return "∞";
-    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
-    return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor((sec % 3600) / 60)}m`;
+    if (!sec || sec <= 0) return "—";
+    // Round to the nearest minute and carry up, so the Victron 863999s sentinel
+    // (9d 23h 59m 59s) renders as a clean "10d" like the VRM does.
+    const totalMin = Math.round(sec / 60);
+    const d = Math.floor(totalMin / 1440);
+    const h = Math.floor((totalMin % 1440) / 60);
+    const m = totalMin % 60;
+    if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
   }
   _moreInfo(entityId) {
     if (!entityId) return;
@@ -107,8 +114,9 @@ class VanPowerFlowCard extends HTMLElement {
           </div>
           <div class="box battery" data-node="battery">
             <div class="hdr"><ha-icon icon="${c.battery.icon}"></ha-icon><span>${c.battery.name}</span></div>
+            <div class="state" data-f="batt-state">—</div>
             <div class="soc" data-f="batt-soc">— %</div>
-            <div class="primary dc" data-f="batt-power">— W</div>
+            <div class="primary" data-f="batt-power">— W</div>
             <div class="sub" data-f="batt-ttg">—</div>
             <div class="sub dim" data-f="batt-va">—</div>
           </div>
@@ -154,9 +162,12 @@ class VanPowerFlowCard extends HTMLElement {
     f["alt-power"].textContent = this._fmtW(this._num(c.alternator.power));
     // Battery
     const bp = this._num(c.battery.power); // negative = discharging
+    // Victron's UI labels by current direction, not the GX state entity (which
+    // has a wide deadband and reads "idle" under small loads). Derive from power.
+    const battStatus = bp < -0.5 ? "Discharging" : bp > 0.5 ? "Charging" : "Idle";
+    f["batt-state"].textContent = battStatus;
     f["batt-soc"].textContent = Math.round(this._num(c.battery.soc)) + " %";
-    f["batt-power"].innerHTML =
-      `<span class="arrow">${bp > 0 ? "↓" : bp < 0 ? "↑" : "•"}</span>${this._fmtW(Math.abs(bp))} DC`;
+    f["batt-power"].textContent = this._fmtW(bp); // signed: negative when discharging
     f["batt-ttg"].innerHTML = `<ha-icon class="mini" icon="mdi:timer-sand"></ha-icon>${this._fmtTtg(this._num(c.battery.time_to_go))}`;
     f["batt-va"].textContent =
       `${this._num(c.battery.voltage).toFixed(2)} V · ${this._num(c.battery.current).toFixed(1)} A`;
@@ -265,8 +276,6 @@ const STYLE = `
   .hdr ha-icon { --mdc-icon-size: 18px; color: #6fc0ff; }
   .state { font-size: 12px; color: #8fa6bd; text-transform: capitalize; margin-top: 4px; min-height: 14px; }
   .primary { font-size: 22px; font-weight: 500; margin-top: 2px; }
-  .primary.dc { font-size: 18px; color: #ffd27f; }
-  .primary .arrow { margin-right: 3px; opacity: .8; }
   .soc { font-size: 30px; font-weight: 600; margin-top: 2px; }
   .sub { font-size: 12px; color: #9fb3c8; margin-top: 3px; display: flex; align-items: center; justify-content: center; gap: 3px; }
   .sub.dim { color: #6f829a; font-size: 11px; }
