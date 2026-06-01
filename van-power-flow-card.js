@@ -15,7 +15,7 @@
  * Vanilla JS custom element — no build step. Config via YAML or the visual editor.
  */
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 // Inverter/charger states that mean "charging the battery" (AC -> DC), used to
 // flip the battery<->inverter flow direction. Extend via config if needed.
@@ -320,8 +320,8 @@ class VanPowerFlowCard extends HTMLElement {
 
 const STYLE = `
   ha-card {
-    background: var(--vpf-bg, #0d1a26);
-    color: var(--vpf-fg, #eaf2fb);
+    background: var(--vpf-bg, var(--ha-card-background, var(--card-background-color)));
+    color: var(--vpf-fg, var(--primary-text-color));
     padding: 8px 12px 14px;
     overflow: hidden;
   }
