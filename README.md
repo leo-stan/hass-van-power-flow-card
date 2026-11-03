@@ -195,7 +195,7 @@ Run all regression checks with `node --test *.test.mjs`.
 
 For an unreleased version, copy `van-power-flow-card.js` from this repository to
 your Home Assistant `config/www/` directory and register it as a JavaScript Module
-at `/local/van-power-flow-card.js?v=1.2.2`. When replacing an existing manual
+at `/local/van-power-flow-card.js?v=1.3.0`. When replacing an existing manual
 installation, update its resource URL's version query and refresh your browser.
 The charging timer, tap/hold controls and animation fixes are all in this file;
 no separate van-specific variant is required.

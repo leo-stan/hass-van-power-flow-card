@@ -25,7 +25,7 @@
  * Vanilla JS custom element — no build step. Config via YAML or the visual editor.
  */
 
-const VERSION = "1.2.2-flow-animation";
+const VERSION = "1.3.0";
 
 // Inverter/charger states that mean "charging the battery" (AC -> DC), used to
 // flip the battery<->inverter flow direction.
