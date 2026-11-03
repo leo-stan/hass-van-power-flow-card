@@ -25,7 +25,7 @@
  * Vanilla JS custom element — no build step. Config via YAML or the visual editor.
  */
 
-const VERSION = "1.2.0";
+const VERSION = "1.2.2-flow-animation";
 
 // Inverter/charger states that mean "charging the battery" (AC -> DC), used to
 // flip the battery<->inverter flow direction.
@@ -89,7 +89,16 @@ class VanPowerFlowCard extends HTMLElement {
   _has_val(id) { const s = this._st(id); return !!s && s.state !== "unavailable" && s.state !== "unknown"; }
   _stateStr(id) { const s = this._st(id); return s ? s.state : "—"; }
   _fmtW(w) { const a = Math.abs(w); return a >= 1000 ? (w / 1000).toFixed(1) + " kW" : Math.round(w) + " W"; }
-  _fmtState(s) { return (s || "").replace(/_/g, " "); }
+  _fmtState(s) {
+    return (s || "")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+  _fmtGridState(s) {
+    if (["grid", "generator", "shore_power"].includes(s)) return "Connected";
+    if (s === "not_connected") return "Not Connected";
+    return this._fmtState(s);
+  }
   _fmtTtg(sec) {
     if (!sec || sec <= 0) return "—";
     const d = Math.floor(sec / 86400);
@@ -98,6 +107,37 @@ class VanPowerFlowCard extends HTMLElement {
     if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
     if (h > 0) return `${h}h ${m}m`;
     return `${m}m`;
+  }
+  // Consumed Ah is Victron's signed deficit from full (zero when full).
+  // Use net shunt current so running loads are already deducted from charging.
+  _batteryTime() {
+    const b = this._config.battery;
+    const number = (id) => {
+      const state = this._st(id)?.state;
+      if (state == null || String(state).trim() === "") return null;
+      const value = Number(state);
+      return Number.isFinite(value) ? value : null;
+    };
+    const power = number(b.power), current = number(b.current);
+    const soc = number(b.soc), consumed = number(b.consumed_ah);
+    const charging = b.power ? power !== null && power > 0.5 : current !== null && current > 0.1;
+    const discharging = b.power ? power !== null && power < -0.5 : current !== null && current < -0.1;
+    if (charging) {
+      if (soc !== null && soc === 100) return { text: "Full", title: "Battery reports 100% state of charge" };
+      if (current === null || current <= 0.1 || consumed === null || consumed > 0 || (soc !== null && (soc < 0 || soc > 100))) {
+        return { text: "—", title: "Time to full needs valid consumed Ah and positive net battery current" };
+      }
+      if (consumed === 0) return { text: "Full", title: "Battery monitor reports no remaining amp-hour deficit" };
+      const seconds = -consumed / current * 3600;
+      return { text: `≈ ${seconds < 60 ? "<1m" : this._fmtTtg(seconds)} to full`,
+        title: "Estimated from consumed Ah ÷ net battery current; assumes the current rate continues. Charge taper and losses can extend the actual time." };
+    }
+    if (discharging || (!b.power && !b.current)) {
+      const seconds = number(b.time_to_go);
+      return { text: seconds !== null && seconds > 0 ? this._fmtTtg(seconds) : "—",
+        title: "Victron time to go at the current load (to the configured discharge floor)" };
+    }
+    return { text: soc === 100 && (power !== null || current !== null) ? "Full" : "—", title: "No net charge or discharge estimate available" };
   }
   _vinText(id) { return this._has_val(id) ? `${this._num(id).toFixed(2)} V in` : ""; }
 
@@ -128,7 +168,7 @@ class VanPowerFlowCard extends HTMLElement {
       if (cfg.power || cfg.state) rows.push(stateRow);
       if (cfg.soc) rows.push(`<div class="soc" data-f="battery-soc">— %</div>`);
       if (cfg.power) rows.push(powerRow);
-      if (cfg.time_to_go) rows.push(`<div class="sub" data-f="battery-ttg">—</div>`);
+      if (cfg.time_to_go || (cfg.consumed_ah && cfg.current)) rows.push(`<div class="sub" data-f="battery-ttg">—</div>`);
       if (cfg.voltage || cfg.temperature) rows.push(`<div class="sub dim" data-f="battery-va">—</div>`);
     } else if (key === "solar" || key === "alternator") {
       if (cfg.state) rows.push(stateRow);
@@ -201,18 +241,39 @@ class VanPowerFlowCard extends HTMLElement {
     this._wrap.style.gridTemplateColumns = this._gridCols;
     this._wrap.style.gridTemplateRows = this._gridRows;
     this._svg = this.shadowRoot.querySelector(".lines");
+    this._drawing = null;
     this._f = {};
     this.shadowRoot.querySelectorAll("[data-f]").forEach((el) => (this._f[el.dataset.f] = el));
 
-    // Click a node -> History panel of its relevant entities.
-    this.shadowRoot.querySelectorAll(".box").forEach((box) => {
-      box.addEventListener("click", () => this._history(this._historyEntities(box.dataset.node)));
-    });
+    this._bindNodeInteractions(this.shadowRoot.querySelectorAll(".box"));
 
     if (this._ro) this._ro.disconnect();
     this._ro = new ResizeObserver(() => this._draw());
     this._ro.observe(this._wrap);
     this._built = true;
+  }
+
+  // Tap a controlled node for mode controls; hold for history.
+  _bindNodeInteractions(boxes) {
+    boxes.forEach((box) => {
+      const node = box.dataset.node;
+      const cfg = this._config[node];
+      const modeEntity = cfg && cfg.mode;
+      if (!modeEntity) {
+        box.addEventListener("click", () => this._history(this._historyEntities(node)));
+        return;
+      }
+      let holdTimer = null, held = false;
+      const cancel = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } };
+      box.addEventListener("pointerdown", () => {
+        held = false;
+        holdTimer = setTimeout(() => { held = true; this._history(this._historyEntities(node)); }, 500);
+      });
+      box.addEventListener("pointerup", () => { cancel(); if (!held) this._moreInfo(modeEntity); });
+      box.addEventListener("pointerleave", cancel);
+      box.addEventListener("pointercancel", cancel);
+    });
+
   }
 
   _historyEntities(key) {
@@ -233,7 +294,10 @@ class VanPowerFlowCard extends HTMLElement {
     for (const k of ["grid", "solar", "alternator", "inverter", "ac_loads", "dc_loads"]) {
       if (!has[k]) continue;
       const cfg = c[k];
-      if (cfg.state) this._set(`${k}-state`, this._fmtState(this._stateStr(cfg.state)));
+      if (cfg.state) {
+        const state = this._stateStr(cfg.state);
+        this._set(`${k}-state`, k === "grid" ? this._fmtGridState(state) : this._fmtState(state));
+      }
       if (cfg.power) this._set(`${k}-power`, this._fmtW(this._num(cfg.power)));
       if ((k === "solar" || k === "alternator") && cfg.input_voltage) {
         this._set(`${k}-vin`, this._vinText(cfg.input_voltage));
@@ -251,8 +315,10 @@ class VanPowerFlowCard extends HTMLElement {
     }
     if (b.soc) this._set("battery-soc", Math.round(this._num(b.soc)) + " %");
     if (b.power && f["battery-power"]) this._set("battery-power", this._fmtW(bp));
-    if (b.time_to_go && f["battery-ttg"]) {
-      f["battery-ttg"].innerHTML = `<ha-icon class="mini" icon="mdi:timer-sand"></ha-icon>${this._fmtTtg(this._num(b.time_to_go))}`;
+    if (f["battery-ttg"]) {
+      const time = this._batteryTime();
+      f["battery-ttg"].innerHTML = `<ha-icon class="mini" icon="mdi:timer-sand"></ha-icon>${time.text}`;
+      f["battery-ttg"].title = time.title;
     }
     if (f["battery-va"]) {
       const parts = [];
@@ -334,13 +400,19 @@ class VanPowerFlowCard extends HTMLElement {
       paths += `<path id="${s.id}" class="line ${s.flow.active ? "on" : "off"}" d="${d}" />`;
       if (s.flow.active) {
         for (let i = 0; i < 3; i++) {
+          // Negative offsets start every particle on its path immediately.
+          // A future begin leaves the circle at the SVG origin until it starts.
           dots += `<circle r="3.2" class="dot">
-            <animateMotion dur="3.2s" begin="${(i * 3.2 / 3).toFixed(2)}s" repeatCount="indefinite" calcMode="linear">
-              <mpath href="#${s.id}" />
+            <animateMotion path="${d}" dur="3.2s" begin="${(-i * 3.2 / 3).toFixed(2)}s" repeatCount="indefinite" calcMode="linear">
             </animateMotion></circle>`;
         }
       }
     }
+    // HA sends unrelated state updates frequently. Keep the existing SVG (and
+    // its animation clock) when geometry, activity and direction are unchanged.
+    const drawing = `${w},${h}:${paths}${dots}`;
+    if (drawing === this._drawing) return;
+    this._drawing = drawing;
     this._svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
     this._svg.setAttribute("width", w);
     this._svg.setAttribute("height", h);
@@ -408,6 +480,7 @@ const NODE_SCHEMAS = {
     { name: "soc", selector: SENSOR }, { name: "power", selector: SENSOR },
     { name: "voltage", selector: SENSOR }, { name: "current", selector: SENSOR },
     { name: "temperature", selector: SENSOR }, { name: "time_to_go", selector: SENSOR },
+    { name: "consumed_ah", selector: SENSOR },
     { name: "state", selector: SENSOR }],
   grid: [...COMMON, { name: "state", selector: SENSOR }, { name: "power", selector: SENSOR }],
   solar: [...COMMON, { name: "power", selector: SENSOR }, { name: "state", selector: SENSOR }, { name: "input_voltage", selector: SENSOR }],
@@ -435,6 +508,7 @@ const LABELS = {
   ac_loads: "AC Loads (optional)", dc_loads: "DC Loads (optional)",
   name: "Display name", icon: "Icon", soc: "State of charge (%)", power: "Power (W)",
   voltage: "Voltage (V)", current: "Current (A)", temperature: "Temperature",
+  consumed_ah: "Consumed amp-hours (Ah, negative deficit from full)",
   time_to_go: "Time to go (s)", state: "State / charge stage", input_voltage: "Input voltage (V)",
   mode: "Control entity (tap target)",
 };
