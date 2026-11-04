@@ -60,6 +60,49 @@ build step**, themeable, with a visual editor.
 
 ## Configuration
 
+### Optional battery-management controls
+
+Storage mode and cold protection can each be added independently. Omit their
+sections (or leave the enable entity empty in the visual editor) to keep the
+original card layout. Select your own enable helper, status sensor and temperature
+sensor; there are no hardcoded entity IDs or charger commands in the card.
+
+```yaml
+storage_mode:
+  entity: input_boolean.storage_mode
+  status: sensor.storage_mode_status       # optional
+  next_full_charge: sensor.next_full_charge_display  # optional
+  last_full_charge: sensor.last_full_charge_display  # optional
+cold_protection:
+  entity: input_boolean.cold_charge_protection
+  status: sensor.cold_charge_status        # optional
+  blocked: input_boolean.cold_charge_blocked  # optional; binary_sensor also works
+  temperature: sensor.your_battery_temperature  # optional; any temperature sensor
+```
+
+The configured status sensor is shown whether the mode is on or off, so text
+such as `Off — normal charging` matches your existing status card. Optional next
+and last full-charge fields display the selected sensors' text without
+recalculating your calibration schedule.
+
+The rows show HA's reported state, not a locally guessed safety decision. Missing
+entities are marked unavailable, unavailable switches cannot be toggled, and
+failed service calls are shown inline. Switch entities are supported in place of
+input booleans. Displaying a temperature here does **not** configure the cutoff.
+Choose the enforcement sensor in your automation too.
+
+Already have charging automations? Connect their helpers as above. Otherwise, the
+optional [battery-management setup](examples/battery-management/README.md) includes
+a helper package and a configurable automation blueprint. Its temperature picker
+accepts any sensor reporting °C or °F, including a BMS, external probe or
+inverter/charger sensor. Installing the card alone never installs charging logic.
+
+<p align="center">
+  <img src="docs/optional-controls.png" alt="Optional storage and cold-protection controls on the live van dashboard" width="500">
+</p>
+
+### Power-flow configuration
+
 For Victron systems, use the GX system's active input source for the Grid node:
 
 ```yaml
@@ -195,7 +238,7 @@ Run all regression checks with `node --test *.test.mjs`.
 
 For an unreleased version, copy `van-power-flow-card.js` from this repository to
 your Home Assistant `config/www/` directory and register it as a JavaScript Module
-at `/local/van-power-flow-card.js?v=1.3.0`. When replacing an existing manual
+at `/local/van-power-flow-card.js?v=1.4.0`. When replacing an existing manual
 installation, update its resource URL's version query and refresh your browser.
 The charging timer, tap/hold controls and animation fixes are all in this file;
 no separate van-specific variant is required.

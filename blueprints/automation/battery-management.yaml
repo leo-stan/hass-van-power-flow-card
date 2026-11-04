@@ -1,0 +1,214 @@
+blueprint:
+  name: Van Power Flow — optional storage and cold-charge control
+  description: >-
+    Optional server-side charging logic, independent of the card/browser.
+    Select any temperature sensor (Celsius or Fahrenheit), SoC sensor, helpers,
+    and your own actions to inhibit/allow charging. Install the example helper
+    package first, or create equivalent helpers. Both features can be disabled.
+    Cold protection always wins over storage/calibration. Use one controller
+    per set of chargers; do not run competing storage/temperature automations.
+  domain: automation
+  author: leo-stan
+  source_url: https://github.com/leo-stan/hass-van-power-flow-card/blob/main/blueprints/automation/battery-management.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    sensors:
+      name: Battery measurements
+      input:
+        temperature_sensor:
+          name: Temperature sensor
+          description: Any sensor reporting °C or °F. Select your battery/BMS/probe temperature, not ambient unless appropriate.
+          default: []
+          selector:
+            entity:
+              domain: sensor
+        soc_sensor:
+          name: Battery state of charge (%)
+          default: []
+          selector:
+            entity:
+              domain: sensor
+    controls:
+      name: Feature switches
+      input:
+        storage_switch:
+          name: Storage-mode enable helper
+          selector:
+            entity:
+              domain: input_boolean
+        protection_switch:
+          name: Cold-protection enable helper
+          selector:
+            entity:
+              domain: input_boolean
+        calibration_switch:
+          name: Full-charge/calibration override (optional)
+          description: An existing calibration helper bypasses the SoC hold, but never cold protection. Leave empty if unused.
+          default: []
+          selector:
+            entity:
+              domain: input_boolean
+    internal:
+      name: Persistent state helpers
+      collapsed: true
+      input:
+        storage_holding:
+          name: Storage-holding helper
+          selector:
+            entity:
+              domain: input_boolean
+        cold_blocked:
+          name: Cold-blocked helper
+          selector:
+            entity:
+              domain: input_boolean
+        charging_inhibited:
+          name: Charging-inhibited helper
+          selector:
+            entity:
+              domain: input_boolean
+    limits:
+      name: Limits
+      collapsed: true
+      input:
+        low_soc:
+          name: Storage resume charge at (%)
+          default: 45
+          selector:
+            number: {min: 0, max: 99, step: 1, unit_of_measurement: "%", mode: box}
+        high_soc:
+          name: Storage stop charge at (%)
+          default: 55
+          selector:
+            number: {min: 1, max: 100, step: 1, unit_of_measurement: "%", mode: box}
+        cutoff_c:
+          name: Cold cutoff (°C)
+          description: 0°C = 32°F. Readings are converted automatically from °F.
+          default: 0
+          selector:
+            number: {min: -20, max: 20, step: 0.1, unit_of_measurement: "°C", mode: box}
+        resume_c:
+          name: Cold recovery (°C)
+          description: Must exceed cutoff. Default 2.3°C is approximately 36°F.
+          default: 2.3
+          selector:
+            number: {min: -19, max: 30, step: 0.1, unit_of_measurement: "°C", mode: box}
+    actions:
+      name: Charger actions
+      input:
+        disable_charging:
+          name: Prevent charging
+          description: Configure every charger (solar, inverter/charger, alternator, etc.). These actions are retried every minute while inhibited; make them idempotent.
+          selector:
+            action: {}
+        enable_charging:
+          name: Allow charging again
+          description: Explicitly configure the safe recovery settings for your devices. These actions run when an inhibition ends, including when feature switches are turned off.
+          selector:
+            action: {}
+        charger_entities:
+          name: Charger control entities to watch (optional)
+          description: Select the switches/selects changed by your actions to reassert a lockout immediately after a manual change. The minute watchdog always runs.
+          default: []
+          selector:
+            entity:
+              multiple: true
+
+mode: queued
+max: 30
+variables:
+  temperature_entity: !input temperature_sensor
+  soc_entity: !input soc_sensor
+  storage_entity: !input storage_switch
+  protection_entity: !input protection_switch
+  calibration_entity: !input calibration_switch
+  hold_entity: !input storage_holding
+  cold_entity: !input cold_blocked
+  inhibited_entity: !input charging_inhibited
+  low: !input low_soc
+  high: !input high_soc
+  cutoff: !input cutoff_c
+  resume: !input resume_c
+triggers:
+  - trigger: state
+    entity_id: !input temperature_sensor
+  - trigger: state
+    entity_id: !input soc_sensor
+  - trigger: state
+    entity_id: !input storage_switch
+  - trigger: state
+    entity_id: !input protection_switch
+  - trigger: state
+    entity_id: !input calibration_switch
+  - trigger: state
+    entity_id: !input charger_entities
+  - trigger: homeassistant
+    event: start
+  - trigger: event
+    event_type: automation_reloaded
+  - trigger: time_pattern
+    minutes: "/1"
+actions:
+  # Evaluate in actions (after earlier queued runs), not at trigger time.
+  - variables:
+      storage_on: "{{ is_state(storage_entity, 'on') }}"
+      protection_on: "{{ not is_state(protection_entity, 'off') }}"
+      calibrating: "{{ calibration_entity is string and is_state(calibration_entity, 'on') }}"
+      soc: "{{ states(soc_entity) if soc_entity is string else 'unknown' }}"
+      raw_temp: "{{ states(temperature_entity) if temperature_entity is string else 'unknown' }}"
+      unit: "{{ state_attr(temperature_entity, 'unit_of_measurement') if temperature_entity is string else none }}"
+      valid_temp: "{{ is_number(raw_temp) and unit in ['°C', '°F'] }}"
+      temp_c: "{{ ((raw_temp | float(-1000)) - 32) / 1.8 if unit == '°F' else raw_temp | float(-1000) }}"
+      cold: >-
+        {{ protection_on and (not valid_temp or resume <= cutoff
+           or temp_c < cutoff or (is_state(cold_entity, 'on') and temp_c < resume)) }}
+      holding: >-
+        {{ storage_on and not calibrating and
+           (not is_number(soc) or soc | float(-1) < 0 or soc | float(101) > 100
+            or low >= high or soc | float(0) >= high
+            or (is_state(hold_entity, 'on') and soc | float(0) > low)) }}
+  - if: "{{ is_state(cold_entity, 'on') != cold }}"
+    then:
+      - if: "{{ cold }}"
+        then:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input cold_blocked
+        else:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input cold_blocked
+  - if: "{{ is_state(hold_entity, 'on') != holding }}"
+    then:
+      - if: "{{ holding }}"
+        then:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input storage_holding
+        else:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input storage_holding
+  - choose:
+      - conditions: "{{ cold or holding }}"
+        sequence:
+          # Latch before actions: if a charger command fails, recovery is still
+          # remembered and shutdown will be retried on the next watchdog tick.
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input charging_inhibited
+          - choose:
+              - conditions: "{{ true }}"
+                sequence: !input disable_charging
+      - conditions:
+          - condition: state
+            entity_id: !input charging_inhibited
+            state: "on"
+        sequence:
+          - choose:
+              - conditions: "{{ true }}"
+                sequence: !input enable_charging
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input charging_inhibited

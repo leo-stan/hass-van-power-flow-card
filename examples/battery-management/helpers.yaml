@@ -1,0 +1,40 @@
+# OPTIONAL helper package for the battery-management blueprint. Both features
+# start OFF on first installation and restore their settings on later restarts.
+# One installation/battery per helper set. Existing helpers can be selected
+# instead: the blueprint does not depend on these particular entity IDs.
+input_boolean:
+  vpf_storage_mode:
+    name: VPF Storage Mode
+    icon: mdi:battery-heart-variant
+  vpf_cold_protection:
+    name: VPF Cold Protection
+    icon: mdi:snowflake-check
+  vpf_storage_holding:
+    name: VPF Storage Holding
+  vpf_cold_blocked:
+    name: VPF Cold Blocked
+  vpf_charging_inhibited:
+    name: VPF Charging Inhibited
+
+template:
+  - sensor:
+      - name: VPF Storage Status
+        unique_id: vpf_storage_status
+        state: >-
+          {% if not is_state('input_boolean.vpf_storage_mode', 'on') %}
+            Disabled
+          {% elif is_state('input_boolean.vpf_storage_holding', 'on') %}
+            Storage — holding
+          {% else %}
+            Storage — charging allowed
+          {% endif %}
+      - name: VPF Cold Status
+        unique_id: vpf_cold_status
+        state: >-
+          {% if is_state('input_boolean.vpf_cold_protection', 'off') %}
+            Disabled
+          {% elif is_state('input_boolean.vpf_cold_blocked', 'on') %}
+            Charging blocked — cold or temperature unavailable
+          {% else %}
+            Enabled — no temperature lockout
+          {% endif %}

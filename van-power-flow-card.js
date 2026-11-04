@@ -25,7 +25,7 @@
  * Vanilla JS custom element — no build step. Config via YAML or the visual editor.
  */
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
 // Inverter/charger states that mean "charging the battery" (AC -> DC), used to
 // flip the battery<->inverter flow direction.
@@ -48,6 +48,10 @@ const NODE_DEFAULTS = {
 };
 
 const OPTIONAL_NODES = ["grid", "solar", "alternator", "inverter", "ac_loads", "dc_loads"];
+const OPTIONAL_FEATURES = {
+  storage_mode: { name: "Storage mode", icon: "mdi:battery-heart-variant" },
+  cold_protection: { name: "Cold protection", icon: "mdi:snowflake-check" },
+};
 
 class VanPowerFlowCard extends HTMLElement {
   static getConfigElement() {
@@ -68,6 +72,14 @@ class VanPowerFlowCard extends HTMLElement {
         merged[k] = { ...NODE_DEFAULTS[k], ...config[k] };
       }
     }
+    for (const key of Object.keys(OPTIONAL_FEATURES)) {
+      const feature = config[key];
+      if (!feature || !feature.entity) continue;
+      if (!/^(input_boolean|switch)\.[a-z0-9_]+$/.test(feature.entity)) {
+        throw new Error(`${key}.entity must be an input_boolean or switch entity.`);
+      }
+      merged[key] = { ...feature };
+    }
     this._config = merged;
     this._has = { battery: true };
     for (const k of OPTIONAL_NODES) this._has[k] = !!merged[k];
@@ -81,7 +93,78 @@ class VanPowerFlowCard extends HTMLElement {
     requestAnimationFrame(() => this._draw());
   }
 
-  getCardSize() { return 6; }
+  getCardSize() { return 6 + Object.keys(OPTIONAL_FEATURES).filter(k => this._config?.[k]).length; }
+
+  _featuresHTML() {
+    const rows = Object.entries(OPTIONAL_FEATURES).filter(([key]) => this._config[key]);
+    if (!rows.length) return "";
+    return `<div class="features">${rows.map(([key, defaults]) => `
+      <div class="feature" data-feature="${key}">
+        <ha-icon icon="${defaults.icon}"></ha-icon>
+        <div class="feature-copy"><div class="feature-name"></div>
+          <div class="feature-status"></div><div class="feature-detail"></div>
+          ${key === "storage_mode" && this._config[key].next_full_charge ? '<div class="feature-next"></div>' : ""}
+          ${key === "storage_mode" && this._config[key].last_full_charge ? '<div class="feature-last"></div>' : ""}
+          <div class="feature-error" role="alert"></div></div>
+        <button type="button" role="switch" aria-checked="false" disabled>Unavailable</button>
+      </div>`).join("")}</div>`;
+  }
+
+  _updateFeatures() {
+    if (!this._features) return;
+    for (const [key, row] of this._features) {
+      const cfg = this._config[key], state = this._st(cfg.entity)?.state;
+      const available = state === "on" || state === "off";
+      const button = row.querySelector("button");
+      const name = cfg.name || OPTIONAL_FEATURES[key].name;
+      row.querySelector(".feature-name").textContent = name;
+      button.setAttribute("aria-label", name);
+      button.setAttribute("aria-checked", String(state === "on"));
+      button.disabled = !available || !!this._featurePending?.[key];
+      button.textContent = this._featurePending?.[key] ? "Saving…" : available ? (state === "on" ? "On" : "Off") : "Unavailable";
+      let status = !available ? "Control unavailable" : state === "off" ? "Disabled" : "Enabled";
+      if (available && cfg.status) {
+        status = this._has_val(cfg.status) ? this._stateStr(cfg.status) : "Status unavailable";
+      }
+      row.querySelector(".feature-status").textContent = status;
+      const details = [];
+      if (cfg.blocked) {
+        const blocked = this._st(cfg.blocked)?.state;
+        details.push(blocked === "on" ? "Charging blocked" : blocked === "off" ? "No lockout reported" : "Lockout status unavailable");
+      }
+      if (cfg.temperature) {
+        const temperature = this._st(cfg.temperature);
+        details.push(this._has_val(cfg.temperature) ? `${temperature.state}${temperature.attributes?.unit_of_measurement || ""}` : "Temperature unavailable");
+      }
+      row.querySelector(".feature-detail").textContent = details.join(" · ");
+      if (key === "storage_mode") {
+        for (const [field, selector, label] of [
+          ["next_full_charge", ".feature-next", "Next full charge"],
+          ["last_full_charge", ".feature-last", "Last 100%"],
+        ]) {
+          if (cfg[field]) row.querySelector(selector).textContent = `${label}: ${this._has_val(cfg[field]) ? this._stateStr(cfg[field]) : "Unavailable"}`;
+        }
+      }
+    }
+  }
+
+  async _toggleFeature(key) {
+    const cfg = this._config[key], state = this._st(cfg.entity)?.state;
+    if (!["on", "off"].includes(state) || this._featurePending?.[key]) return;
+    this._featurePending ||= {};
+    this._featurePending[key] = true;
+    const error = this._features.find(([name]) => name === key)[1].querySelector(".feature-error");
+    error.textContent = "";
+    this._updateFeatures();
+    try {
+      await this._hass.callService(cfg.entity.split(".")[0], state === "on" ? "turn_off" : "turn_on", { entity_id: cfg.entity });
+    } catch (err) {
+      error.textContent = `Could not change setting: ${err?.message || String(err)}`;
+    } finally {
+      this._featurePending[key] = false;
+      this._updateFeatures();
+    }
+  }
 
   // ---- helpers ----
   _st(id) { return id && this._hass && this._hass.states[id]; }
@@ -215,9 +298,9 @@ class VanPowerFlowCard extends HTMLElement {
     }
     this._gridAreas = areaRows.join(" ");
     const cols = [];
-    if (leftCol) cols.push("1fr");
-    cols.push("1fr");
-    if (rightCol) cols.push("1fr");
+    if (leftCol) cols.push("minmax(0, 1fr)");
+    cols.push("minmax(0, 1fr)");
+    if (rightCol) cols.push("minmax(0, 1fr)");
     this._gridCols = cols.join(" ");
     this._gridRows = `repeat(${rowsUsed}, auto)`;
 
@@ -234,6 +317,7 @@ class VanPowerFlowCard extends HTMLElement {
           <svg class="lines" xmlns="http://www.w3.org/2000/svg"></svg>
           ${boxes}
         </div>
+        ${this._featuresHTML()}
       </ha-card>`;
 
     this._wrap = this.shadowRoot.querySelector(".wrap");
@@ -246,6 +330,8 @@ class VanPowerFlowCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-f]").forEach((el) => (this._f[el.dataset.f] = el));
 
     this._bindNodeInteractions(this.shadowRoot.querySelectorAll(".box"));
+    this._features = [...this.shadowRoot.querySelectorAll("[data-feature]")].map(row => [row.dataset.feature, row]);
+    for (const [key, row] of this._features) row.querySelector("button").addEventListener("click", () => this._toggleFeature(key));
 
     if (this._ro) this._ro.disconnect();
     this._ro = new ResizeObserver(() => this._draw());
@@ -329,6 +415,7 @@ class VanPowerFlowCard extends HTMLElement {
       }
       this._set("battery-va", parts.join(" · "));
     }
+    this._updateFeatures();
   }
 
   // Flow per line key: {active, reverse}. reverse flips dot direction (toward `a`).
@@ -462,6 +549,24 @@ const STYLE = `
   .sub { font-size: 12px; color: var(--vpf-sub, #9fb3c8); margin-top: 3px; display: flex; align-items: center; justify-content: center; gap: 3px; }
   .sub.dim { color: var(--vpf-sub-dim, #6f829a); font-size: 11px; }
   ha-icon.mini { --mdc-icon-size: 13px; }
+  .features { border-top: 1px solid var(--divider-color, #34404c); margin: 0 4px; padding-top: 6px; }
+  .feature { display: flex; align-items: center; gap: 10px; padding: 9px 0; }
+  .feature > ha-icon { color: var(--vpf-accent, #6fc0ff); flex: none; }
+  .feature-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .feature-name { font-size: 14px; }
+  .feature-status, .feature-detail, .feature-next, .feature-last { font-size: 12px; color: var(--secondary-text-color, #8fa6bd); margin-top: 3px; }
+  .feature-error { font-size: 12px; color: var(--error-color, #ff7777); }
+  .feature button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--divider-color, #34404c); border-radius: 18px; padding: 6px 12px; min-height: 40px; cursor: pointer; }
+  .feature button[aria-checked="true"] { color: var(--vpf-accent, #6fc0ff); border-color: currentColor; }
+  .feature button:disabled { opacity: .5; cursor: default; }
+  .feature button:focus-visible { outline: 2px solid var(--vpf-accent, #6fc0ff); outline-offset: 3px; }
+  @media (max-width: 600px) {
+    .wrap { column-gap: 16px; padding-inline: 2px; }
+    .box { min-width: 0; padding: 10px 4px; }
+    .hdr { font-size: 12px; gap: 3px; }
+    .hdr span { min-width: 0; overflow-wrap: anywhere; }
+    .soc { font-size: 26px; white-space: nowrap; }
+  }
 `;
 
 // ---------------------------------------------------------------------------
@@ -499,6 +604,17 @@ const EDITOR_SCHEMA = [
   { name: "inverter", type: "expandable", flatten: false, schema: NODE_SCHEMAS.inverter },
   { name: "ac_loads", type: "expandable", flatten: false, schema: NODE_SCHEMAS.ac_loads },
   { name: "dc_loads", type: "expandable", flatten: false, schema: NODE_SCHEMAS.dc_loads },
+  ...Object.keys(OPTIONAL_FEATURES).map(name => ({ name, type: "expandable", flatten: false, schema: [
+    { name: "entity", selector: { entity: { domain: ["input_boolean", "switch"] } } },
+    { name: "name", selector: TEXT }, { name: "status", selector: SENSOR },
+    ...(name === "cold_protection" ? [
+      { name: "blocked", selector: { entity: { domain: ["binary_sensor", "input_boolean"] } } },
+      { name: "temperature", selector: SENSOR },
+    ] : [
+      { name: "next_full_charge", selector: SENSOR },
+      { name: "last_full_charge", selector: SENSOR },
+    ]),
+  ] })),
 ];
 
 const LABELS = {
@@ -511,6 +627,9 @@ const LABELS = {
   consumed_ah: "Consumed amp-hours (Ah, negative deficit from full)",
   time_to_go: "Time to go (s)", state: "State / charge stage", input_voltage: "Input voltage (V)",
   mode: "Control entity (tap target)",
+  storage_mode: "Storage mode controls (optional)", cold_protection: "Cold protection controls (optional)",
+  entity: "Enable/disable entity", status: "Status sensor (optional)", blocked: "Charging lockout entity (optional)",
+  next_full_charge: "Next full charge display sensor (optional)", last_full_charge: "Last full charge display sensor (optional)",
 };
 
 class VanPowerFlowCardEditor extends HTMLElement {
